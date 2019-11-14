@@ -1,0 +1,383 @@
+RNAprof events selection per annotation and threshold (10-3) for WT/35S-ASCO/RNAI-ASCO (36M reads)
+==================================================================================================
+
+:exp_id: Ana_161109_01
+:type: analysis
+
+Summarised the RNAprof events according to the Araport11 they crossed with.
+
+
+.. {r setup, echo=FALSE, warning=FALSE, message=FALSE}
+
+library('dplyr')
+library('magrittr')
+library('tidyr')
+library('ggplot2')
+library("GenomicRanges")
+library("rtracklayer")
+library("VennDiagram")
+library("RColorBrewer")
+
+theme_set(theme_bw())
+options(stringsAsFactors=FALSE)
+
+.. ..
+
+Loading input files
+-------------------
+
+Loading the GFF files for each kind of annotation to compare with (CDS, UTRs,
+introns).
+
+Loading of all available RNAprof files. Set the seq names to fit the ones from
+Araport11 and filter to keep only p.adj <= 1e-3.
+
+.. {r gff_files_loading}
+
+annotations_files <- Sys.glob("./in/Ana_160928_01/*.gz") %>%
+                     grep("201606", ., value=TRUE, inver=TRUE)
+RNAprof_files <- Sys.glob("./in/Ana_161024_03/result/*/loci.gff")
+
+all_annotations <- lapply(annotations_files, import.gff3)
+names(all_annotations) <- gsub("^.*Araport11_([^.]*).*$", "\\1",
+                               annotations_files)
+
+all_RNAprof <- lapply(RNAprof_files, import.gff3) %>%
+               lapply(function(x){
+                      seqlevels(x) <- paste0("Chr", seqlevels(x))
+                      if (is.null(x$`P-adj`)){
+			      x$P.adj <- as.numeric(x$P.adj)
+                      } else {
+			      x$P.val <- as.numeric(x$`P-val`)
+			      x$P.adj <- as.numeric(x$`P-adj`)
+                              x$`P-val` <- NULL
+                              x$`P-adj` <- NULL
+                      }
+                      x$log2FC <- log2(as.numeric(x$Score))
+                      return(x[x$P.adj <= 1e-3])
+                               }
+                      )
+names(all_RNAprof) <- sub("^.*rnaprof_([^/]*).*$", "\\1", RNAprof_files)
+
+.. ..
+
+Overlap with Araport11 annotations
+----------------------------------
+
+For each annotation type and each RNAprof file compute the overlap between the
+two to keep only RNAprof diff regions that overlap. . Save the result as GFF.
+Order the sample by log2 fold change and adjusted p-value and save them in CSV.
+
+.. {r any_overlap_calculation}
+
+dir.create("./out/any", showWarnings=FALSE)
+for (annotation in names(all_annotations)){
+    dir.create(paste0("./out/any/", annotation), showWarnings=FALSE)
+    for (RNAprof in names(all_RNAprof)){
+        # collect the overlaps
+        overlap <- findOverlaps(all_RNAprof[[RNAprof]],
+                                all_annotations[[annotation]])
+        if (length(queryHits(overlap)) != 0){
+            RNAprof_hits <- all_RNAprof[[RNAprof]][queryHits(overlap)]
+            RNAprof_hits$Araport11_annotation <-
+                all_annotations[[annotation]][subjectHits(overlap)]$ID
+            # save as GFF
+            export.gff3(RNAprof_hits,
+                        paste0("./out/any/", annotation, "/", RNAprof, ".gff"))
+            # Transform the ID list as a single string
+            RNAprof_hits$ID <- RNAprof_hits$ID %>%
+                               lapply(paste, collapse=";") %>%
+                               unlist
+            # Save as csv
+            RNAprof_hits %>%
+                as.data.frame %>%
+                mutate(ID=gsub(",", ";", ID),
+                       Araport_gene=gsub("(AT[1-5MC]G[0-9]*).*$", "\\1",
+                                         Araport11_annotation),
+                       RNAprof_gene=gsub("(AT[1-5MC]G[0-9]*).*$", "\\1", ID)) %>%
+                filter(Araport_gene == RNAprof_gene) %>%
+                arrange(-abs(log2FC), P.adj) %>%
+                select(Araport11_annotation, Score, log2FC, Mean1:P.adj,
+                       seqnames:strand, ID) %>%
+                write.csv(paste0("./out/any/", annotation, "/", RNAprof, ".csv"),
+                          row.names=FALSE, quote=FALSE)
+        }
+    }
+}
+
+.. ..
+
+Do the same but keep only the differentially zones included in the annotation.
+
+.. {r included_overlap_calculation}
+
+dir.create("./out/included", showWarnings=FALSE)
+for (annotation in names(all_annotations)){
+    dir.create(paste0("./out/included/", annotation), showWarnings=FALSE)
+    for (RNAprof in names(all_RNAprof)){
+        # collect the overlaps
+        overlap <- findOverlaps(all_RNAprof[[RNAprof]],
+                                all_annotations[[annotation]],
+                                type="within")
+        if (length(queryHits(overlap)) != 0){
+            RNAprof_hits <- all_RNAprof[[RNAprof]][queryHits(overlap)]
+            RNAprof_hits$Araport11_annotation <-
+                all_annotations[[annotation]][subjectHits(overlap)]$ID
+            RNAprof_hits$Araport11_width <-
+                width(all_annotations[[annotation]][subjectHits(overlap)])
+            # save as GFF
+            export.gff3(RNAprof_hits,
+                        paste0("./out/included/", annotation, "/", RNAprof, ".gff"))
+            # Transform the ID list as a single string
+            RNAprof_hits$ID <- RNAprof_hits$ID %>%
+                               lapply(paste, collapse=";") %>%
+                               unlist
+            # Format, sort by log2FC and P.adj
+            RNAprof_hits_annotated <-
+                RNAprof_hits %>%
+                as.data.frame %>%
+                mutate(ID=gsub(",", ";", ID),
+                       Araport_gene=gsub("(AT[1-5MC]G[0-9]*).*$", "\\1",
+                                         Araport11_annotation),
+                       RNAprof_gene=gsub("(AT[1-5MC]G[0-9]*).*$", "\\1", ID)) %>%
+                filter(Araport_gene == RNAprof_gene) %>%
+                arrange(-abs(log2FC), P.adj) %>%
+                select(Araport11_annotation, Score, log2FC, Mean1:P.adj,
+                       seqnames:strand, ID, Araport11_width)
+            # Save all the hits
+            RNAprof_hits_annotated %>%
+                write.csv(paste0("./out/included/", annotation, "/", RNAprof, "_all.csv"),
+                          row.names=FALSE, quote=FALSE)
+            # Save the major hits (>.7 of the annotation)
+            major_RNAprof_hits_annotated <-
+                RNAprof_hits_annotated %>%
+                filter(as.numeric(width) > .7 * Araport11_width)
+            major_RNAprof_hits_annotated %>%
+                write.csv(paste0("./out/included/", annotation, "/", RNAprof, "_major.csv"),
+                          row.names=FALSE, quote=FALSE)
+            # Save the minor hits (>.7 of the annotation)
+            RNAprof_hits_annotated %>%
+                filter(!(ID %in% major_RNAprof_hits_annotated$ID)) %>%
+                write.csv(paste0("./out/included/", annotation, "/", RNAprof, "_minor.csv"),
+                          row.names=FALSE, quote=FALSE)
+        }
+    }
+}
+
+.. ..
+
+Creation of dataframe with different column length with padding
+---------------------------------------------------------------
+
+Function to be able to create dataframe with different column length.
+
+.. {r makePaddedDataFrame}
+
+na.pad <- function(x,len){
+    x[1:len]
+}
+
+makePaddedDataFrame <- function(l,...){
+    maxlen <- max(sapply(l,length))
+    data.frame(lapply(l,na.pad,len=maxlen),...)
+}
+
+.. ..
+
+Common annotation lists
+-----------------------
+
+The reference is WT. Construct lists and Venn Diagram with differentially
+expressed annotations compared to reference. Do it for each type of match (all,
+major and minor) and annotation.
+
+.. {r venn_list}
+
+RNAprof_cond <- names(all_RNAprof) %>%
+                grep("WT_", ., value=TRUE)
+for (type in c("all", "major", "minor")){
+    for (annotation in names(all_annotations)){
+        RNAprof_cond_files <- RNAprof_cond %>%
+                              paste0("out/included/", annotation, "/", ., "_", type,".csv")
+        RNAprof_Hits_lists <-
+            lapply(RNAprof_cond_files,
+                   function(x){
+                       if (file.exists(x)){
+                           raw_data <- read.csv(x) %>%
+                                       select(Araport11_annotation)
+                       } else {
+                           raw_data <- data.frame(Araport11_annotation=c())
+                       }
+                       return(unlist(raw_data))
+                   })
+        names(RNAprof_Hits_lists) <- RNAprof_cond
+        RNAprof_Hits_lists <- 
+            RNAprof_Hits_lists[lapply(RNAprof_Hits_lists, length) != 0]
+        if (length(RNAprof_Hits_lists) > 1){
+            RNAprof_Hits_rep <- get.venn.partitions(RNAprof_Hits_lists) %>% 
+                                group_by(..set..) %>%
+                                mutate(..values..=paste(..values..),
+                                       ..values..=gsub('^.*c\\(', "", ..values..),
+                                       ..values..=gsub('[",()\n]', "", ..values..),
+                                       ..values..=ifelse(..values.. == "list",
+                                                         "",
+                                                         ..values..)) %>%
+                                ungroup
+            RNAprof_Hits_list <- RNAprof_Hits_rep
+            for (column in names(RNAprof_Hits_lists)) {
+                RNAprof_Hits_list[[column]] <- ifelse(RNAprof_Hits_list[[column]], column, "")
+            }
+            RNAprof_Hits_list <- RNAprof_Hits_list %>%
+                             unite(all, -..set.., -..count.., sep=" ") %>%
+                             select(-..set.., -..count..)
+            RNAprof_Hits_rep_df <- RNAprof_Hits_list %>%
+                                   t %>%
+                                   as.list %>%
+                                   lapply(strsplit, " ") %>%
+                                   lapply(unlist) %>%
+                                   makePaddedDataFrame
+            names(RNAprof_Hits_rep_df) <- 1:ncol(RNAprof_Hits_rep_df)
+            write.table(RNAprof_Hits_rep_df,
+                        paste0("./out/included/", annotation, "/rep_", type, ".csv"),
+                        row.names=FALSE, quote=FALSE, col.names=FALSE, sep=",")
+            # Venn as png
+            venn.diagram(RNAprof_Hits_lists,
+                         filename=paste0("./out/included/", annotation, "/rep_", type, ".png"),
+                         imagetype="png",
+                         height=12, width=12, units="cm",
+                         fill=brewer.pal("Set1", n=5)[1:length(RNAprof_Hits_lists)],
+                         cex=1, main.cex=2, cat.cex=1, cat.dist=.1, margin=.15)
+        }
+    }
+}
+
+.. ..
+
+Common gene lists
+-----------------
+
+The reference is WT. Construct lists and Venn Diagram with differentially
+expressed annotations compared to reference. Do it for each type of match (all,
+major and minor) and annotation. Keep only the genes.
+
+.. {r gene_venn_list}
+
+RNAprof_cond <- names(all_RNAprof) %>%
+                grep("WT_", ., value=TRUE)
+for (type in c("all", "major", "minor")){
+    for (annotation in names(all_annotations)){
+        RNAprof_cond_files <- RNAprof_cond %>%
+                              paste0("out/included/", annotation, "/", ., "_", type, ".csv")
+        RNAprof_Hits_lists <-
+            lapply(RNAprof_cond_files,
+                   function(x){
+                       if (file.exists(x)){
+                           raw_data <- read.csv(x) %>%
+                                       select(Araport11_annotation) %>%
+                                       mutate(Araport11_annotation=
+                                                gsub("(AT[1-5MC]G[0-9]*).*$",
+                                                     "\\1",
+                                                     Araport11_annotation
+                                                     ))
+                       } else {
+                           raw_data <- data.frame(Araport11_annotation=c())
+                       }
+                       return(unlist(raw_data))
+                   })
+        names(RNAprof_Hits_lists) <- RNAprof_cond
+        RNAprof_Hits_lists <- 
+            RNAprof_Hits_lists[lapply(RNAprof_Hits_lists, length) != 0]
+        if (length(RNAprof_Hits_lists) > 1){
+            RNAprof_Hits_rep <- get.venn.partitions(RNAprof_Hits_lists) %>% 
+                                group_by(..set..) %>%
+                                mutate(..values..=paste(..values..),
+                                       ..values..=gsub('^.*c\\(', "", ..values..),
+                                       ..values..=gsub('[",()\n]', "", ..values..),
+                                       ..values..=ifelse(..values.. == "list",
+                                                         "",
+                                                         ..values..)) %>%
+                                ungroup
+            RNAprof_Hits_list <- RNAprof_Hits_rep
+            for (column in names(RNAprof_Hits_lists)) {
+                RNAprof_Hits_list[[column]] <- ifelse(RNAprof_Hits_list[[column]], column, "")
+            }
+            RNAprof_Hits_list <- RNAprof_Hits_list %>%
+                             unite(all, -..set.., -..count.., sep=" ") %>%
+                             select(-..set.., -..count..)
+            RNAprof_Hits_rep_df <- RNAprof_Hits_list %>%
+                                   t %>%
+                                   as.list %>%
+                                   lapply(strsplit, " ") %>%
+                                   lapply(unlist) %>%
+                                   makePaddedDataFrame
+            names(RNAprof_Hits_rep_df) <- 1:ncol(RNAprof_Hits_rep_df)
+            write.table(RNAprof_Hits_rep_df,
+                        paste0("./out/included/", annotation, "/gene_rep_", type, ".csv"),
+                        row.names=FALSE, quote=FALSE, col.names=FALSE, sep=",")
+            # Venn as png
+            venn.diagram(RNAprof_Hits_lists,
+                         filename=paste0("./out/included/", annotation, "/gene_rep_", type, ".png"),
+                         imagetype="png",
+                         height=12, width=12, units="cm",
+                         fill=brewer.pal("Set1", n=5)[1:length(RNAprof_Hits_lists)],
+                         cex=1, main.cex=2, cat.cex=1, cat.dist=.1, margin=.15)
+        }
+    }
+}
+
+.. ..
+
+
+RNAprof figures organisation
+----------------------------
+
+Copy the RNAprof images of the retain annotation in the correct subfolder.
+Rename them with the name of the gene instead of list of isoform.
+
+.. {r file_copy, engine="bash"}
+
+for file in $(ls ./out/included/{introns,CDS}/*_all.csv | grep -v "rep_")
+do
+    tmp=${file%%_all.csv}
+    RNAprof=${tmp##*/}
+    out_folder="out/included/RNAprof_images/$RNAprof"
+    mkdir -p $out_folder
+    tail -n +2 $file |\
+        cut -d, -f1 |\
+        sed 's/\(AT[1-5MC]G[0-9]*\).*$/\1/' |\
+        sort |\
+        uniq |\
+        xargs -n 1 -P 24\
+            bash -c 'for filename;\
+                        do cp -n in/Ana_161024_03/result/rnaprof_'${RNAprof}'/$filename*.png '$out_folder'/$filename.png;\
+                     done' bash
+done
+
+.. ..
+
+Conversion to xlsx files
+------------------------
+
+Conversion of list files with the correct column type
+
+.. {r list_csv_to_xlsx, engine="bash"}
+
+for file in $(ls out/*/*/*.csv | grep -v "rep_")
+do
+    unoconv --format xlsx \
+        -i FilterOptions=44,34,76,1,1/1/2/10/3/10/4/10/5/10/6/10/7/10/8/1/9/1/10/1/11/1/12/1/13/1/14/1 \
+        $file
+done
+
+.. ..
+
+Conversion of the repartition list with default options
+
+.. {r rep_csv_to_xlsx, engine='bash'}
+
+for file in $(ls out/*/*/*rep*.csv)
+do
+    unoconv --format xlsx $file
+done
+
+.. ..
